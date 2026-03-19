@@ -1,12 +1,4 @@
-"""
-services/database.py
-====================
-Persistent storage using PostgreSQL via asyncpg (Supabase/Neon/any Postgres).
-Connection pool is created once at startup and reused across all requests.
-"""
-
 import logging
-from datetime import datetime
 from typing import Optional
 
 import asyncpg
@@ -15,12 +7,10 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Global connection pool — initialised in init_db()
 _pool: Optional[asyncpg.Pool] = None
 
 
 async def init_db() -> None:
-    """Create connection pool and tables. Call once at startup."""
     global _pool
     _pool = await asyncpg.create_pool(settings.DATABASE_URL, min_size=2, max_size=10)
 
@@ -30,31 +20,31 @@ async def init_db() -> None:
                 user_id     BIGINT PRIMARY KEY,
                 username    TEXT,
                 first_name  TEXT,
-                gender      TEXT    NOT NULL,
-                age         INTEGER NOT NULL,
-                region      TEXT    NOT NULL,
-                premium     BOOLEAN NOT NULL DEFAULT FALSE,
+                gender      TEXT        NOT NULL,
+                age         INTEGER     NOT NULL,
+                region      TEXT        NOT NULL,
+                premium     BOOLEAN     NOT NULL DEFAULT FALSE,
                 joined_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                 last_seen   TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
             CREATE TABLE IF NOT EXISTS reports (
                 id           SERIAL PRIMARY KEY,
-                reporter_id  BIGINT NOT NULL,
-                reported_id  BIGINT NOT NULL,
+                reporter_id  BIGINT      NOT NULL,
+                reported_id  BIGINT      NOT NULL,
                 reason       TEXT,
                 reported_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
             CREATE TABLE IF NOT EXISTS banned_users (
-                user_id     BIGINT PRIMARY KEY,
-                reason      TEXT,
-                banned_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                temporary   BOOLEAN NOT NULL DEFAULT TRUE
+                user_id    BIGINT PRIMARY KEY,
+                reason     TEXT,
+                banned_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                temporary  BOOLEAN     NOT NULL DEFAULT TRUE
             );
         """)
 
-    logger.info("Database initialised (Supabase/PostgreSQL)")
+    logger.info("PostgreSQL database initialised")
 
 
 def _pool_check() -> asyncpg.Pool:
@@ -121,7 +111,6 @@ async def get_premium_count() -> int:
 async def add_report(
     reporter_id: int, reported_id: int, reason: Optional[str] = None
 ) -> int:
-    """Insert report and return total reports against reported_id."""
     async with _pool_check().acquire() as conn:
         await conn.execute("""
             INSERT INTO reports (reporter_id, reported_id, reason)
@@ -167,9 +156,7 @@ async def unban_user_db(user_id: int) -> None:
 
 async def get_all_bans() -> list[dict]:
     async with _pool_check().acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM banned_users ORDER BY banned_at DESC"
-        )
+        rows = await conn.fetch("SELECT * FROM banned_users ORDER BY banned_at DESC")
         return [dict(r) for r in rows]
 
 
