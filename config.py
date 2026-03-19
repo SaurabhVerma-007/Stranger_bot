@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     BOT_TOKEN: str
     ADMIN_ID: Optional[int] = None
+    DATABASE_URL: str                    # ← add this
     PAYMENT_PROVIDER_TOKEN: str = ""
     PREMIUM_STARS_PRICE: int = 50
     REPORTS_BEFORE_BAN: int = 3

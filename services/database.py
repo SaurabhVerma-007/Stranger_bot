@@ -1,165 +1,178 @@
-import asyncio
+"""
+services/database.py
+====================
+Persistent storage using PostgreSQL via asyncpg (Supabase/Neon/any Postgres).
+Connection pool is created once at startup and reused across all requests.
+"""
+
 import logging
-import os
 from datetime import datetime
 from typing import Optional
 
-import aiosqlite
+import asyncpg
+
+from config import settings
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "bot.db")
+# Global connection pool — initialised in init_db()
+_pool: Optional[asyncpg.Pool] = None
 
 
 async def init_db() -> None:
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.executescript("""
+    """Create connection pool and tables. Call once at startup."""
+    global _pool
+    _pool = await asyncpg.create_pool(settings.DATABASE_URL, min_size=2, max_size=10)
+
+    async with _pool.acquire() as conn:
+        await conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                user_id     INTEGER PRIMARY KEY,
+                user_id     BIGINT PRIMARY KEY,
                 username    TEXT,
                 first_name  TEXT,
                 gender      TEXT    NOT NULL,
                 age         INTEGER NOT NULL,
                 region      TEXT    NOT NULL,
-                premium     INTEGER NOT NULL DEFAULT 0,
-                joined_at   TEXT    NOT NULL,
-                last_seen   TEXT    NOT NULL
+                premium     BOOLEAN NOT NULL DEFAULT FALSE,
+                joined_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                last_seen   TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
             CREATE TABLE IF NOT EXISTS reports (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                reporter_id  INTEGER NOT NULL,
-                reported_id  INTEGER NOT NULL,
+                id           SERIAL PRIMARY KEY,
+                reporter_id  BIGINT NOT NULL,
+                reported_id  BIGINT NOT NULL,
                 reason       TEXT,
-                reported_at  TEXT    NOT NULL
+                reported_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
 
             CREATE TABLE IF NOT EXISTS banned_users (
-                user_id     INTEGER PRIMARY KEY,
+                user_id     BIGINT PRIMARY KEY,
                 reason      TEXT,
-                banned_at   TEXT    NOT NULL,
-                temporary   INTEGER NOT NULL DEFAULT 1
+                banned_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                temporary   BOOLEAN NOT NULL DEFAULT TRUE
             );
         """)
-        await db.commit()
-    logger.info("Database initialised at %s", DB_PATH)
+
+    logger.info("Database initialised (Supabase/PostgreSQL)")
+
+
+def _pool_check() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("Database not initialised — call init_db() first")
+    return _pool
 
 
 # ── Users ──────────────────────────────────────────────────────────────────────
 
 async def upsert_user(
     user_id: int, gender: str, age: int, region: str,
-    username: Optional[str] = None, first_name: Optional[str] = None,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None,
     premium: bool = False,
 ) -> None:
-    now = datetime.utcnow().isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO users (user_id, username, first_name, gender, age, region, premium, joined_at, last_seen)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                username=excluded.username, first_name=excluded.first_name,
-                gender=excluded.gender, age=excluded.age, region=excluded.region,
-                premium=excluded.premium, last_seen=excluded.last_seen
-        """, (user_id, username, first_name, gender, age, region, int(premium), now, now))
-        await db.commit()
+    async with _pool_check().acquire() as conn:
+        await conn.execute("""
+            INSERT INTO users (user_id, username, first_name, gender, age, region, premium)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            ON CONFLICT (user_id) DO UPDATE SET
+                username   = EXCLUDED.username,
+                first_name = EXCLUDED.first_name,
+                gender     = EXCLUDED.gender,
+                age        = EXCLUDED.age,
+                region     = EXCLUDED.region,
+                premium    = EXCLUDED.premium,
+                last_seen  = NOW()
+        """, user_id, username, first_name, gender, age, region, premium)
 
 
 async def set_premium_db(user_id: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET premium = 1 WHERE user_id = ?", (user_id,))
-        await db.commit()
+    async with _pool_check().acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET premium = TRUE WHERE user_id = $1", user_id
+        )
 
 
 async def update_last_seen(user_id: int) -> None:
-    now = datetime.utcnow().isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET last_seen = ? WHERE user_id = ?", (now, user_id))
-        await db.commit()
+    async with _pool_check().acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET last_seen = NOW() WHERE user_id = $1", user_id
+        )
 
 
 async def get_all_users() -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM users ORDER BY joined_at DESC") as cursor:
-            return [dict(r) for r in await cursor.fetchall()]
+    async with _pool_check().acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM users ORDER BY joined_at DESC")
+        return [dict(r) for r in rows]
 
 
 async def get_user_count() -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+    async with _pool_check().acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM users")
 
 
 async def get_premium_count() -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM users WHERE premium = 1") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+    async with _pool_check().acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM users WHERE premium = TRUE")
 
 
 # ── Reports ────────────────────────────────────────────────────────────────────
 
-async def add_report(reporter_id: int, reported_id: int, reason: Optional[str] = None) -> int:
-    now = datetime.utcnow().isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO reports (reporter_id, reported_id, reason, reported_at) VALUES (?, ?, ?, ?)",
-            (reporter_id, reported_id, reason, now)
+async def add_report(
+    reporter_id: int, reported_id: int, reason: Optional[str] = None
+) -> int:
+    """Insert report and return total reports against reported_id."""
+    async with _pool_check().acquire() as conn:
+        await conn.execute("""
+            INSERT INTO reports (reporter_id, reported_id, reason)
+            VALUES ($1, $2, $3)
+        """, reporter_id, reported_id, reason)
+
+        return await conn.fetchval(
+            "SELECT COUNT(*) FROM reports WHERE reported_id = $1", reported_id
         )
-        await db.commit()
-        async with db.execute(
-            "SELECT COUNT(*) FROM reports WHERE reported_id = ?", (reported_id,)
-        ) as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 1
 
 
 async def get_all_reports() -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM reports ORDER BY reported_at DESC") as cursor:
-            return [dict(r) for r in await cursor.fetchall()]
+    async with _pool_check().acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM reports ORDER BY reported_at DESC")
+        return [dict(r) for r in rows]
 
 
 async def get_report_count() -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM reports") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+    async with _pool_check().acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM reports")
 
 
 # ── Bans ───────────────────────────────────────────────────────────────────────
 
 async def ban_user_db(user_id: int, reason: str, temporary: bool = True) -> None:
-    now = datetime.utcnow().isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO banned_users (user_id, reason, banned_at, temporary)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                reason=excluded.reason, banned_at=excluded.banned_at, temporary=excluded.temporary
-        """, (user_id, reason, now, int(temporary)))
-        await db.commit()
+    async with _pool_check().acquire() as conn:
+        await conn.execute("""
+            INSERT INTO banned_users (user_id, reason, temporary)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (user_id) DO UPDATE SET
+                reason    = EXCLUDED.reason,
+                banned_at = NOW(),
+                temporary = EXCLUDED.temporary
+        """, user_id, reason, temporary)
 
 
 async def unban_user_db(user_id: int) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM banned_users WHERE user_id = ?", (user_id,))
-        await db.commit()
+    async with _pool_check().acquire() as conn:
+        await conn.execute(
+            "DELETE FROM banned_users WHERE user_id = $1", user_id
+        )
 
 
 async def get_all_bans() -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM banned_users ORDER BY banned_at DESC") as cursor:
-            return [dict(r) for r in await cursor.fetchall()]
+    async with _pool_check().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM banned_users ORDER BY banned_at DESC"
+        )
+        return [dict(r) for r in rows]
 
 
 async def get_ban_count() -> int:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM banned_users") as cursor:
-            row = await cursor.fetchone()
-            return row[0] if row else 0
+    async with _pool_check().acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM banned_users")
