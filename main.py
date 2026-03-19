@@ -10,6 +10,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
 from config import settings
 from handlers import onboarding, menu, chat, payment, moderation
@@ -50,6 +51,15 @@ async def main() -> None:
 
     # ── Background tasks (inactive-chat timeout, etc.) ────────────────────────
     scheduler = start_scheduler(bot, state_store)
+
+    # ── Register bot commands (shows in Telegram menu) ─────────────────────────
+    await bot.set_my_commands([
+        BotCommand(command="start",   description="Start the bot & setup profile"),
+        BotCommand(command="next",    description="Skip to a new stranger"),
+        BotCommand(command="stop",    description="End current chat"),
+        BotCommand(command="report",  description="Report current stranger"),
+        BotCommand(command="profile", description="View your profile"),
+    ])
 
     logger.info("Bot is starting …")
     try:
