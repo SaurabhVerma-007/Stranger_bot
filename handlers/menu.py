@@ -1,13 +1,3 @@
-"""
-handlers/menu.py
-================
-Main menu actions:
-  - 🔍 Find Stranger
-  - ⭐ Gender Filter (Premium)
-  - 👤 Profile
-  - 🚫 Report User
-"""
-
 import logging
 
 from aiogram import F, Router
@@ -18,12 +8,15 @@ from aiogram.types import CallbackQuery, Message
 from services.matchmaking import find_or_wait
 from services.payments import send_premium_invoice
 from services.state import BotState
+from services import database as db
 from utils.keyboards import (
     gender_filter_keyboard,
     main_menu_keyboard,
+    profile_keyboard,
+    confirm_delete_keyboard,
 )
 from utils.messages import Msg
-from utils.guards import require_profile, require_rules_agreed
+from utils.guards import require_profile
 
 logger = logging.getLogger(__name__)
 router = Router(name="menu")
@@ -70,12 +63,10 @@ async def cb_gender_filter(
     await callback.answer()
 
     if not profile.premium:
-        # Prompt payment
         await callback.message.answer(Msg.PREMIUM_REQUIRED)
         await send_premium_invoice(callback.bot, uid)
         return
 
-    # Premium user — ask preference
     await callback.message.answer(
         Msg.CHOOSE_GENDER_FILTER, reply_markup=gender_filter_keyboard()
     )
@@ -90,7 +81,7 @@ async def cb_apply_filter(
     callback: CallbackQuery, state: FSMContext, state_store: BotState
 ) -> None:
     uid = callback.from_user.id
-    gender_pref = callback.data.replace("filter_", "")  # "male" | "female" | "any"
+    gender_pref = callback.data.replace("filter_", "")
     await state.clear()
     await callback.answer()
     await callback.message.edit_text(
@@ -113,15 +104,83 @@ async def cb_profile(callback: CallbackQuery, state_store: BotState) -> None:
 
     text = (
         f"👤 <b>Your Profile</b>\n\n"
-        f"Gender : {profile.gender.capitalize()}\n"
-        f"Age    : {profile.age}\n"
-        f"Region : {profile.region}\n"
-        f"Premium: {'⭐ Yes' if profile.premium else 'No'}"
+        f"Gender  : {profile.gender.capitalize()}\n"
+        f"Age     : {profile.age}\n"
+        f"Region  : {profile.region}\n"
+        f"Premium : {'⭐ Yes' if profile.premium else 'No'}"
     )
-    await callback.message.answer(text, reply_markup=main_menu_keyboard())
+    await callback.message.answer(text, reply_markup=profile_keyboard())
 
 
-# ── 🚫 Report User (from menu) ──────────────────────────────────────────────────
+@router.callback_query(F.data == "profile_back")
+async def cb_profile_back(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.edit_text(
+        "Main menu:", reply_markup=main_menu_keyboard()
+    )
+
+
+# ── 🗑 Delete Profile ────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data == "profile_delete")
+async def cb_profile_delete(callback: CallbackQuery) -> None:
+    await callback.answer()
+    await callback.message.edit_text(
+        "⚠️ <b>Are you sure you want to delete your profile?</b>\n\n"
+        "This will remove all your data. You can create a new profile "
+        "anytime by sending /start.",
+        reply_markup=confirm_delete_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "profile_delete_confirm")
+async def cb_profile_delete_confirm(
+    callback: CallbackQuery, state_store: BotState
+) -> None:
+    uid = callback.from_user.id
+    await callback.answer()
+
+    # End any active chat first
+    partner_id = await state_store.end_chat(uid)
+    if partner_id:
+        try:
+            await callback.bot.send_message(
+                partner_id,
+                "👋 Stranger has disconnected.",
+                reply_markup=main_menu_keyboard(),
+            )
+        except Exception:
+            pass
+
+    # Remove from queue if waiting
+    await state_store.dequeue(uid)
+
+    # Delete from in-memory state
+    async with state_store._lock:
+        state_store.users.pop(uid, None)
+        state_store.rate_limits.pop(uid, None)
+        state_store.last_activity.pop(uid, None)
+
+    # Delete from database
+    await db.delete_user(uid)
+
+    await callback.message.edit_text(
+        "🗑 <b>Profile deleted.</b>\n\n"
+        "Send /start anytime to create a new profile."
+    )
+    logger.info("User %s deleted their profile", uid)
+
+
+@router.callback_query(F.data == "profile_delete_cancel")
+async def cb_profile_delete_cancel(callback: CallbackQuery) -> None:
+    await callback.answer("Cancelled.")
+    await callback.message.edit_text(
+        "✅ Profile kept. Back to menu:",
+        reply_markup=main_menu_keyboard()
+    )
+
+
+# ── 🚫 Report User ──────────────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "menu_report")
 async def cb_report_from_menu(

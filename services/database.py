@@ -163,3 +163,8 @@ async def get_all_bans() -> list[dict]:
 async def get_ban_count() -> int:
     async with _pool_check().acquire() as conn:
         return await conn.fetchval("SELECT COUNT(*) FROM banned_users")
+
+
+async def delete_user(user_id: int) -> None:
+    async with _pool_check().acquire() as conn:
+        await conn.execute("DELETE FROM users WHERE user_id = $1", user_id)
