@@ -1,0 +1,29 @@
+# render.yaml — Render deployment configuration
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: worker          # background worker — no HTTP port
+    name: strangerchat-bot
+    runtime: docker
+    repo: https://github.com/YOUR_USERNAME/YOUR_REPO   # replace
+    branch: main
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: BOT_TOKEN
+        sync: false       # set manually in Render dashboard
+      - key: PAYMENT_PROVIDER_TOKEN
+        value: ""
+      - key: PREMIUM_STARS_PRICE
+        value: "50"
+      - key: REPORTS_BEFORE_BAN
+        value: "3"
+      - key: RATE_LIMIT_MESSAGES
+        value: "20"
+      - key: RATE_LIMIT_WINDOW_SECONDS
+        value: "10"
+      - key: CHAT_IDLE_TIMEOUT_SECONDS
+        value: "300"
+      - key: SCHEDULER_INTERVAL_SECONDS
+        value: "60"
+      - key: MAX_QUEUE_WAIT_SECONDS
+        value: "120"

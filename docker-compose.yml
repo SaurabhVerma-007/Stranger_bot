@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    # No ports needed — bot uses long-polling, not webhooks
+    volumes:
+      # Mount source for live-reload during development
+      - .:/app
+    environment:
+      - PYTHONUNBUFFERED=1
