@@ -1,8 +1,3 @@
-"""
-Anonymous Stranger Chat Bot — main.py
-Entry point: registers all routers and starts polling.
-"""
-
 import asyncio
 import logging
 
@@ -13,11 +8,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from config import settings
-from handlers import onboarding, menu, chat, payment, moderation
+from handlers import onboarding, menu, chat, payment, moderation, admin
 from services.state import BotState
+from services.database import init_db
 from utils.scheduler import start_scheduler
 
-# ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(name)s: %(message)s",
@@ -27,32 +22,28 @@ logger = logging.getLogger(__name__)
 
 
 async def main() -> None:
-    """Bootstrap and run the bot."""
+    await init_db()
+
     bot = Bot(
         token=settings.BOT_TOKEN,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
 
-    # Shared in-memory state (injected via middleware / passed through workflow_data)
     state_store = BotState()
-
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
 
-    # ── Inject shared state into every handler via workflow_data ───────────────
     dp["state_store"] = state_store
 
-    # ── Register routers (order matters for priority) ──────────────────────────
     dp.include_router(onboarding.router)
     dp.include_router(payment.router)
     dp.include_router(chat.router)
     dp.include_router(moderation.router)
+    dp.include_router(admin.router)
     dp.include_router(menu.router)
 
-    # ── Background tasks (inactive-chat timeout, etc.) ────────────────────────
     scheduler = start_scheduler(bot, state_store)
 
-    # ── Register bot commands (shows in Telegram menu) ─────────────────────────
     await bot.set_my_commands([
         BotCommand(command="start",   description="Start the bot & setup profile"),
         BotCommand(command="next",    description="Skip to a new stranger"),

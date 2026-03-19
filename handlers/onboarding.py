@@ -1,17 +1,7 @@
-"""
-handlers/onboarding.py
-======================
-Handles /start and the multi-step profile-setup FSM:
-  Step 1 → Gender
-  Step 2 → Age
-  Step 3 → Region
-  Step 4 → Rules agreement
-"""
-
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -22,14 +12,13 @@ from aiogram.types import (
 )
 
 from services.state import BotState, UserProfile
+from services import database as db
 from utils.keyboards import gender_keyboard, main_menu_keyboard
 from utils.messages import Msg
 
 logger = logging.getLogger(__name__)
 router = Router(name="onboarding")
 
-
-# ── FSM States ─────────────────────────────────────────────────────────────────
 
 class OnboardingStates(StatesGroup):
     waiting_gender = State()
@@ -38,16 +27,13 @@ class OnboardingStates(StatesGroup):
     waiting_rules  = State()
 
 
-# ── /start ─────────────────────────────────────────────────────────────────────
-
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, state_store: BotState) -> None:
-    """Entry point — greet user and begin onboarding."""
     user_id = message.from_user.id
 
-    # Check if already onboarded
     existing = await state_store.get_profile(user_id)
     if existing and existing.agreed_to_rules:
+        await db.update_last_seen(user_id)
         await message.answer(Msg.WELCOME_BACK, reply_markup=main_menu_keyboard())
         return
 
@@ -55,8 +41,6 @@ async def cmd_start(message: Message, state: FSMContext, state_store: BotState) 
     await message.answer(Msg.ASK_GENDER, reply_markup=gender_keyboard())
     await state.set_state(OnboardingStates.waiting_gender)
 
-
-# ── Step 1: Gender ──────────────────────────────────────────────────────────────
 
 @router.callback_query(
     OnboardingStates.waiting_gender,
@@ -71,8 +55,6 @@ async def cb_gender(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-# ── Step 2: Age ─────────────────────────────────────────────────────────────────
-
 @router.message(OnboardingStates.waiting_age, F.text)
 async def msg_age(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
@@ -85,11 +67,9 @@ async def msg_age(message: Message, state: FSMContext) -> None:
     await state.set_state(OnboardingStates.waiting_region)
 
 
-# ── Step 3: Region ──────────────────────────────────────────────────────────────
-
 @router.message(OnboardingStates.waiting_region, F.text)
 async def msg_region(message: Message, state: FSMContext) -> None:
-    region = (message.text or "").strip()[:64]   # cap length
+    region = (message.text or "").strip()[:64]
     if len(region) < 2:
         await message.answer(Msg.INVALID_REGION)
         return
@@ -108,26 +88,39 @@ def _rules_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-# ── Step 4: Rules agreement ────────────────────────────────────────────────────
-
 @router.callback_query(OnboardingStates.waiting_rules, F.data == "rules_agree")
 async def cb_rules_agree(
     callback: CallbackQuery, state: FSMContext, state_store: BotState
 ) -> None:
     data = await state.get_data()
+    user = callback.from_user
+
     profile = UserProfile(
-        user_id=callback.from_user.id,
+        user_id=user.id,
         gender=data["gender"],
         age=data["age"],
         region=data["region"],
         agreed_to_rules=True,
     )
+
+    # Save to in-memory state
     await state_store.save_profile(profile)
+
+    # Save to persistent database
+    await db.upsert_user(
+        user_id=user.id,
+        gender=data["gender"],
+        age=data["age"],
+        region=data["region"],
+        username=user.username,
+        first_name=user.first_name,
+    )
+
     await state.clear()
     await callback.message.edit_text(Msg.RULES_ACCEPTED)
     await callback.message.answer(Msg.SETUP_DONE, reply_markup=main_menu_keyboard())
     await callback.answer()
-    logger.info("User %s completed onboarding", callback.from_user.id)
+    logger.info("User %s completed onboarding", user.id)
 
 
 @router.callback_query(OnboardingStates.waiting_rules, F.data == "rules_decline")
